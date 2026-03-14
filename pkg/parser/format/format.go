@@ -529,3 +529,16 @@ func (c *CTERestorer) RestoreCTEFunc() func() {
 		}
 	}
 }
+
+// TrimTrailingStatementSemicolon removes a single trailing ';' plus trailing
+// whitespace after it from a formatted statement string.
+func TrimTrailingStatementSemicolon(sql string) string {
+	end := len(sql)
+	for end > 0 && (sql[end-1] == ' ' || sql[end-1] == '\n' || sql[end-1] == '\t') {
+		end--
+	}
+	if end > 0 && sql[end-1] == ';' {
+		end--
+	}
+	return sql[:end]
+}
