@@ -542,3 +542,12 @@ func TrimTrailingStatementSemicolon(sql string) string {
 	}
 	return sql[:end]
 }
+
+// AlignKeywordColumn left-pads keyword with spaces to the given width so keyword
+// columns line up in multi-line formatted SQL output.
+func AlignKeywordColumn(keyword string, width int) string {
+	for len(keyword) < width {
+		keyword = " " + keyword
+	}
+	return keyword
+}
