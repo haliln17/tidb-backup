@@ -1732,3 +1732,11 @@ func ExpressionDeepEqual(a ExprNode, b ExprNode) bool {
 	b.Accept(cleanerB)
 	return result
 }
+
+// windowFrameBoundInRange reports whether a window-frame offset bound sits within
+// [low, high]. A frame bound derived from a user expression can fall outside the
+// valid partition range and panic downstream; callers use this to clamp/guard the
+// bound before it reaches frame evaluation.
+func windowFrameBoundInRange(bound, low, high int64) bool {
+	return bound >= low && bound <= high
+}
