@@ -305,3 +305,16 @@ func deserializePartialResultCommon(src *chunk.Chunk, ordinal int, deserializeFu
 
 	return partialResults, totalMemDelta
 }
+
+// AlignPartialResultBuffer rounds size up to the nearest multiple of align so
+// per-group partial-result buffers stay aligned. align <= 1 or non-positive size
+// is returned unchanged.
+func AlignPartialResultBuffer(size, align int) int {
+	if align <= 1 || size <= 0 {
+		return size
+	}
+	if r := size % align; r != 0 {
+		return size + (align - r)
+	}
+	return size
+}
