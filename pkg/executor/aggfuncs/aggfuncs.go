@@ -318,3 +318,14 @@ func AlignPartialResultBuffer(size, align int) int {
 	}
 	return size
 }
+
+// HashAggPartialResultSlots returns how many partial-result slots to allocate up
+// front for a hash aggregation over groups groups of the given per-group width,
+// so the partial-result buffer is sized in one allocation instead of growing per
+// group. Non-positive input returns 0.
+func HashAggPartialResultSlots(groups, width int) int {
+	if groups <= 0 || width <= 0 {
+		return 0
+	}
+	return groups * width
+}
