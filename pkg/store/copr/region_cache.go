@@ -48,6 +48,11 @@ type bucketSplitFallbackInfo struct {
 	remainingRangeCount int
 }
 
+// String renders the split-fallback info for structured logs.
+func (info *bucketSplitFallbackInfo) String() string {
+	return fmt.Sprintf("bucketSplitFallback{reason=%s, remaining=%d}", info.reason, info.remainingRangeCount)
+}
+
 const (
 	locationSummaryMaxDisplay = 5
 )
