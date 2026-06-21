@@ -59,3 +59,15 @@ const (
 	// So when a limit exists, we don't apply the DescScanFactor.
 	SmallScanThreshold = 10000
 )
+
+// IndexScanCostWeight returns the cost weight applied to an index scan given the
+// estimated row count and selectivity. Under-weighting the index-scan factor
+// relative to table scan biases the cost-based optimizer toward suboptimal plans
+// on composite indexes; this keeps the derived weight in a sane, comparable range.
+func IndexScanCostWeight(rows, selectivity float64) float64 {
+	w := rows * selectivity
+	if w < 1 {
+		return 1
+	}
+	return w
+}
