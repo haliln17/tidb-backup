@@ -36,6 +36,7 @@ go_test(
         "batch_coprocessor_test.go",
         "etcd_test.go",
         "main_test.go",
+        "region_cache_split_lock_test.go",
         "store_test.go",
     ],
     embed = [":store"],
