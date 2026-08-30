@@ -58,6 +58,7 @@ go_test(
         "@com_github_pingcap_kvproto//pkg/metapb",
         "@com_github_stretchr_testify//require",
         "@com_github_tikv_client_go_v2//testutils",
+        "@com_github_tikv_client_go_v2//tikv",
         "@com_github_tikv_pd_client//errs",
         "@org_uber_go_goleak//:goleak",
     ],
