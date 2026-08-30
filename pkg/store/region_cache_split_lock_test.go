@@ -36,7 +36,7 @@ import (
 	"github.com/pingcap/tidb/pkg/store/mockstore"
 	"github.com/stretchr/testify/require"
 	tikv "github.com/tikv/client-go/v2/tikv"
-	"github.com/tikv/client-go/v2/tikv/mockstore/cluster"
+	"github.com/tikv/client-go/v2/testutils"
 )
 
 type tikvStoreWrapper interface {
@@ -44,9 +44,9 @@ type tikvStoreWrapper interface {
 }
 
 func TestPessimisticLockResolutionAfterRegionSplit(t *testing.T) {
-	var mockCluster cluster.Cluster
+	var mockCluster testutils.Cluster
 	store, err := mockstore.NewMockStore(
-		mockstore.WithClusterInspector(func(c cluster.Cluster) {
+		mockstore.WithClusterInspector(func(c testutils.Cluster) {
 			mockCluster = c
 		}),
 	)
@@ -55,7 +55,6 @@ func TestPessimisticLockResolutionAfterRegionSplit(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Keys spanning across the planned split point
 	k1 := kv.Key("k_001_primary")
 	k2 := kv.Key("k_002_secondary")
 	val1 := []byte("v1")
@@ -74,8 +73,8 @@ func TestPessimisticLockResolutionAfterRegionSplit(t *testing.T) {
 	err = txn1.LockKeys(ctx, lockCtx, k1, k2)
 	require.NoError(t, err)
 
-	// 2. Trigger region split at k2 (R1 shrinks to ["", k2), R2 takes [k2, ""))
-	origRegion := mockCluster.GetRegionByKey(k2)
+	// 2. Trigger region split at k2 (GetRegionByKey returns (*metapb.Region, *metapb.Peer))
+	origRegion, _ := mockCluster.GetRegionByKey([]byte(k2))
 	require.NotNil(t, origRegion)
 
 	newRegionID, err := mockCluster.AllocID()
@@ -83,7 +82,7 @@ func TestPessimisticLockResolutionAfterRegionSplit(t *testing.T) {
 	newPeerID, err := mockCluster.AllocID()
 	require.NoError(t, err)
 
-	mockCluster.Split(origRegion.GetId(), newRegionID, k2, []uint64{newPeerID}, newPeerID)
+	mockCluster.Split(origRegion.GetId(), newRegionID, []byte(k2), []uint64{newPeerID}, newPeerID)
 
 	// 3. Roll back Txn1: client-go must unlock k2 on child region R2 despite stale cache
 	require.NoError(t, txn1.Rollback())
@@ -100,20 +99,20 @@ func TestPessimisticLockResolutionAfterRegionSplit(t *testing.T) {
 	err = txn2.LockKeys(ctx, lockCtx2, k2)
 	require.NoError(t, err, "k2 lock was not cleared on child region after split rollback")
 
-	// 5. Verify cache reloaded R2
+	// 5. Verify RegionCache explicitly reloaded R2
 	if wrapper, ok := store.(tikvStoreWrapper); ok {
 		tikvStore := wrapper.GetTiKVStore()
 		rc := tikvStore.GetRegionCache()
-		loc, err := rc.LocateKey(tikv.NewBackofferWithVars(ctx, 1000, nil), k2)
+		loc, err := rc.LocateKey(tikv.NewBackofferWithVars(ctx, 1000, nil), []byte(k2))
 		require.NoError(t, err)
 		require.Equal(t, newRegionID, loc.Region.GetID(), "RegionCache did not reload child region")
 	}
 }
 
 func TestCommitSecondaryLockAfterRegionSplit(t *testing.T) {
-	var mockCluster cluster.Cluster
+	var mockCluster testutils.Cluster
 	store, err := mockstore.NewMockStore(
-		mockstore.WithClusterInspector(func(c cluster.Cluster) {
+		mockstore.WithClusterInspector(func(c testutils.Cluster) {
 			mockCluster = c
 		}),
 	)
@@ -141,7 +140,7 @@ func TestCommitSecondaryLockAfterRegionSplit(t *testing.T) {
 	require.NoError(t, err)
 
 	// 2. Split region between k1 and k2
-	origRegion := mockCluster.GetRegionByKey(k2)
+	origRegion, _ := mockCluster.GetRegionByKey([]byte(k2))
 	require.NotNil(t, origRegion)
 
 	newRegionID, err := mockCluster.AllocID()
@@ -149,7 +148,7 @@ func TestCommitSecondaryLockAfterRegionSplit(t *testing.T) {
 	newPeerID, err := mockCluster.AllocID()
 	require.NoError(t, err)
 
-	mockCluster.Split(origRegion.GetId(), newRegionID, k2, []uint64{newPeerID}, newPeerID)
+	mockCluster.Split(origRegion.GetId(), newRegionID, []byte(k2), []uint64{newPeerID}, newPeerID)
 
 	// 3. Commit Txn1: secondary commit must route to child region R2
 	require.NoError(t, txn1.Commit(ctx))
