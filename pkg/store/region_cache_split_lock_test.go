@@ -1,5 +1,33 @@
 package store_test
 
+/*
+ * ============================================================================
+ * ARCHITECTURAL INVARIANT: SPLIT-BOUNDARY LOCK ROUTING & RESOLUTION
+ * ============================================================================
+ *
+ * Core Invariant:
+ * When an existing Region R1 [StartKey, EndKey) splits into R1' [StartKey, SplitKey)
+ * and child Region R2 [SplitKey, EndKey), all active lock operations (commit,
+ * rollback, pessimistic unlock, and lock resolution) targeting keys >= SplitKey
+ * must be transferred and re-routed cleanly to R2.
+ *
+ * Failure Mode / Race Condition:
+ * 1. A client retains a cached descriptor for pre-split R1 [StartKey, EndKey).
+ * 2. Multi-key rollback or secondary commit commands for keys >= SplitKey route
+ *    to R1 based on stale RegionCache mappings.
+ * 3. TiKV rejects requests covering keys outside R1' with `EpochNotMatch`.
+ * 4. If RegionCache fails to atomically drop the orphaned range [SplitKey, EndKey),
+ *    or if callers fail to re-locate every key in the batch individually:
+ *      - Secondary locks on R2 are stranded uncleaned.
+ *      - Concurrent transactions block indefinitely or until lock TTL expiration.
+ *
+ * Required Behavior:
+ * - `RegionCache.OnRegionEpochNotMatch` must invalidate the parent region's range.
+ * - Retry routines must re-resolve keys >= SplitKey to R2 via `current_regions`
+ *   or PD lookup before retrying lock cleanup.
+ * ============================================================================
+ */
+
 import (
 	"context"
 	"testing"
@@ -15,27 +43,6 @@ type tikvStoreWrapper interface {
 	GetTiKVStore() *tikv.KVStore
 }
 
-// =============================================================================
-// INVARIANT DOCUMENTATION: REGION SPLIT LOCK ROUTING & RESOLUTION
-//
-// Invariant:
-// When an existing Region R1 [StartKey, EndKey) splits into R1' [StartKey, SplitKey)
-// (with an incremented epoch version) and a new child Region R2 [SplitKey, EndKey),
-// lock lifecycle operations (Commit, Rollback, Pessimistic Unlock, ResolveLocks)
-// addressing keys >= SplitKey MUST NOT be dropped, skipped, or misrouted.
-//
-// Client-go Execution Path:
-// 1. A client holding a stale RegionCache entry for [StartKey, EndKey) dispatches
-//    a lock resolution or 2PC secondary commit/rollback RPC to R1.
-// 2. TiKV rejects the request with an `EpochNotMatch` error.
-// 3. RegionCache.OnRegionEpochNotMatch must invalidate the stale descriptor for R1.
-// 4. The retry loop (via Backoffer) must re-locate all keys >= SplitKey to R2
-//    (discovering R2 either from the error payload's `current_regions` or PD).
-// 5. The secondary lock on R2 must be explicitly cleared to prevent leaving
-//    orphaned secondary locks on the child region that block concurrent writers
-//    until TTL expiry.
-// =============================================================================
-
 func TestPessimisticLockResolutionAfterRegionSplit(t *testing.T) {
 	var mockCluster cluster.Cluster
 	store, err := mockstore.NewMockStore(
@@ -48,13 +55,13 @@ func TestPessimisticLockResolutionAfterRegionSplit(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Keys designed to start in the same initial region ["", "")
+	// Keys spanning across the planned split point
 	k1 := kv.Key("k_001_primary")
 	k2 := kv.Key("k_002_secondary")
 	val1 := []byte("v1")
 	val2 := []byte("v2")
 
-	// 1. Start Txn1 and acquire pessimistic locks on both keys in Region 1
+	// 1. Acquire pessimistic locks on both keys in Region 1
 	txn1, err := store.Begin()
 	require.NoError(t, err)
 	err = txn1.SetOption(kv.Pessimistic, true)
@@ -67,9 +74,7 @@ func TestPessimisticLockResolutionAfterRegionSplit(t *testing.T) {
 	err = txn1.LockKeys(ctx, lockCtx, k1, k2)
 	require.NoError(t, err)
 
-	// 2. Trigger a Region split at k2 on the cluster.
-	// Region 1 shrinks to ["", "k_002_secondary").
-	// Region 2 is created covering ["k_002_secondary", "").
+	// 2. Trigger region split at k2 (R1 shrinks to ["", k2), R2 takes [k2, ""))
 	origRegion := mockCluster.GetRegionByKey(k2)
 	require.NotNil(t, origRegion)
 
@@ -80,16 +85,10 @@ func TestPessimisticLockResolutionAfterRegionSplit(t *testing.T) {
 
 	mockCluster.Split(origRegion.GetId(), newRegionID, k2, []uint64{newPeerID}, newPeerID)
 
-	/*
-	 * INVARIANT ENFORCEMENT POINT:
-	 * Txn1 rolls back, requiring client-go to release pessimistic locks across
-	 * both keys. k1 is still in R1, but k2 now resides in R2.
-	 * client-go's LockResolver / region cache must handle EpochNotMatch on k2,
-	 * re-route the unlock request to newRegionID, and avoid stranding k2's lock.
-	 */
+	// 3. Roll back Txn1: client-go must unlock k2 on child region R2 despite stale cache
 	require.NoError(t, txn1.Rollback())
 
-	// 3. Start Txn2 and assert that k2 is immediately lockable without blocking on a stale lock
+	// 4. Assert k2 lock was released by successfully locking it in a new transaction
 	txn2, err := store.Begin()
 	require.NoError(t, err)
 	defer txn2.Rollback()
@@ -101,7 +100,7 @@ func TestPessimisticLockResolutionAfterRegionSplit(t *testing.T) {
 	err = txn2.LockKeys(ctx, lockCtx2, k2)
 	require.NoError(t, err, "k2 lock was not cleared on child region after split rollback")
 
-	// 4. Verify RegionCache updated to reflect the new child region
+	// 5. Verify cache reloaded R2
 	if wrapper, ok := store.(tikvStoreWrapper); ok {
 		tikvStore := wrapper.GetTiKVStore()
 		rc := tikvStore.GetRegionCache()
@@ -152,14 +151,10 @@ func TestCommitSecondaryLockAfterRegionSplit(t *testing.T) {
 
 	mockCluster.Split(origRegion.GetId(), newRegionID, k2, []uint64{newPeerID}, newPeerID)
 
-	/*
-	 * INVARIANT ENFORCEMENT POINT:
-	 * During 2PC Commit, secondary commit for k2 must reach child region R2
-	 * even though client-go initially routes according to the pre-split cache.
-	 */
+	// 3. Commit Txn1: secondary commit must route to child region R2
 	require.NoError(t, txn1.Commit(ctx))
 
-	// 3. Confirm Txn2 can read the committed value on the child region
+	// 4. Confirm committed value is readable
 	txn2, err := store.Begin()
 	require.NoError(t, err)
 	defer txn2.Rollback()
